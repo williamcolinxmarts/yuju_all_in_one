@@ -9,3 +9,4 @@ from . import product
 from . import listeners
 from . import base
 from . import madkting_config
+from . import product_mapping
