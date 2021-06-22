@@ -11,7 +11,6 @@
           <field name="url"/>
           <field name="company_id"/>
           <field name="active"/>
-          
         </tree>
       </field>
     </record>
@@ -213,11 +212,23 @@
       <field name="inherit_id" ref="sale.view_order_form"/>
       <field name="arch" type="xml">
         <field name="client_order_ref" position="after">
-          <field name="channel" attrs="{'readonly':[(1,'=',1)]}"/>
-          <field name="channel_order_reference" attrs="{'readonly':[(1,'=',1)]}" />
-          <field name="payment_id" attrs="{'readonly':[(1,'=',1)]}" />
+          <field name="channel" readonly="1"/>
+          <field name="channel_order_reference" readonly="1" />
+          <field name="payment_id" readonly="1" />
         </field>
       </field>
     </record>
+
+    <record id="view_warehouse_yuju_form" model="ir.ui.view">
+      <field name="name">View Warehouse Yuju Form</field>
+      <field name="model">stock.warehouse</field>
+      <field name="inherit_id" ref="stock.view_warehouse"/>
+      <field name="arch" type="xml">
+        <field name="lot_stock_id" position="after">
+          <field name="dropship_enabled"/>
+        </field>
+      </field>
+    </record>
+    
   </data>
 </odoo>

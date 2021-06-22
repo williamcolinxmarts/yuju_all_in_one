@@ -66,7 +66,7 @@ class ProductTemplate(models.Model):
         :rtype: dict
         """
         logger.info("### PRODUCT DATA ###")
-        logger.info(product_data)
+        # logger.info(product_data)
         config = self.env['madkting.config'].get_config()
         mapping = self.env['yuju.mapping.product']
         products = self.env['product.product']
@@ -107,11 +107,16 @@ class ProductTemplate(models.Model):
         if product_data.get('cost'):
             product_data['standard_price'] = product_data.pop('cost', None)
 
+        logger.info("### SEARCH BARCODE : {} ###".format(product_data.get('barcode')))
         if product_data.get('barcode'):
             product_ids = self.env['product.product'].sudo().search([('barcode', '=', product_data.get('barcode', ''))], limit=1)
+            logger.info(product_ids.ids)
             if product_ids.ids:
                 return results.error_result(code='duplicated_barcode',
                                             description='El codigo de barras ya esta previamente registrado')
+        else:
+            logger.info("## DROP EMPTY BARCODE ##")
+            product_data.pop('barcode')
 
         if product_data.get('l10n_mx_edi_code_sat_id'):
             logger.debug('Product data contains l10n_mx_edi_code_sat_id')
@@ -405,7 +410,7 @@ class ProductTemplate(models.Model):
         return self.change_product_status(template_id, active=True, id_shop=id_shop)
 
     @api.model
-    def delete_product(self, template_id, id_shop):
+    def delete_product(self, template_id, id_shop=None):
         """
         :param template_id:
         :type template_id: int

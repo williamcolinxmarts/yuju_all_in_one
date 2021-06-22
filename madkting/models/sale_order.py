@@ -125,7 +125,19 @@ class SaleOrder(models.Model):
         if not order_data.get('invoice_status'):
             order_data['invoice_status'] = 'to invoice'
 
+        if not config:
+            return results.error_result(code='sale_config_error',
+                                        description='No config found for this company')
+
+        if config.dropship_enabled:
+            rutas = self.env['stock.location.route'].sudo().search([('name', '=', 'Dropship')], limit=1)
+            if not rutas.id:
+                return results.error_result(code='sale_config_dropship_error',
+                                        description='No config routes found for dropship')
+
+        logger.debug("## FIELD ERRORS ##")
         field_errors = self._validate_order_fields(order_data=order_data)
+        logger.debug(field_errors)
         if field_errors:
             return results.error_result(code='required_fields_validation',
                                         description=', '.join(field_errors))
@@ -171,10 +183,25 @@ class SaleOrder(models.Model):
             )
         else:
             order_line_model = self.env['sale.order.line']
+
             for line in lines:
                 product_tax_rate = line.pop('tax_rate', False)
                 line['order_id'] = new_sale.id
+
+                if config.dropship_enabled and new_sale.warehouse_id.dropship_enabled:
+                    logger.info("## AGREGAR RUTA DROPSHIP ###")
+                    logger.info("## PEDIDO: {} ###".format(new_sale.name))
+                    product = self.env['product.product'].search([('id', '=', int(line.get('product_id')))], limit=1)
+                    if product.id and product.type == 'product':
+                        logger.info("## ID RUTA: {}".format(rutas.id))
+                        location_stock = new_sale.warehouse_id.lot_stock_id
+                        logger.info("## LOCATION STOCK: {}".format(location_stock.id))
+                        qty_in_branch = self.env['stock.quant']._get_available_quantity(product, location_stock)
+                        logger.info("## QTY IN BRANCH: {}".format(qty_in_branch))
+                        if qty_in_branch < line.get('product_uom_qty', 0):
+                            line.update({"route_id" : rutas.id})
                 try:
+                    logger.info(line)
                     new_line = order_line_model.sudo().create(line)
                 except exceptions.AccessError as err:
                     logger.exception(err)
@@ -185,7 +212,7 @@ class SaleOrder(models.Model):
                     return results.error_result(
                         code='sale_line_access_error',
                         description='An exception has occurred trying to '
-                                    'create a sale line for product {}. '
+                                    'create a sale line for sale order {}. '
                                     'The transaction has been rolledback. '
                                     'Exception: {}'.format(line.get('product_id'), err)
                     )
@@ -196,22 +223,13 @@ class SaleOrder(models.Model):
                     if cancel_sale:
                         new_sale.sudo().unlink()
                     return results.error_result(
-                        code='sale_create_error',
+                        code='sale_create_line_error',
                         description='An exception has occurred trying to '
-                                    'create a sale line for product {}. '
+                                    'create a sale line for sale order {}. '
                                     'The transaction has been rolledback. '
                                     'Exception: {}'.format(line.get('product_id'), lex)
                     )
                 else:
-                    # logger.debug("## AGREGAR RUTA DROPSHIP ###")
-                    if config and config.dropship_enabled:
-                        rutas = self.env['stock.location.route'].sudo().search([('name', '=', 'Dropship')], limit=1)
-                        if rutas.id:
-                            location_stock = new_sale.warehouse_id.lot_stock_id
-                            qty_in_branch = self.env['stock.quant']._get_available_quantity(new_line.product_id, location_stock)
-                            if qty_in_branch < new_line.product_uom_qty:
-                                new_line.route_id = rutas.id
-
                     if not set_tax_rate_by_product and tax_cache.get(tax_rate):
                         new_line.tax_id = tax_cache[tax_rate]
                         continue
@@ -224,8 +242,16 @@ class SaleOrder(models.Model):
                                                                        ('company_id', '=', company_id)],
                                                                       limit=1)
                         new_line.tax_id = tax_cache.get(product_tax_rate)
-            new_sale.action_confirm()
-        data=new_sale.yuju_get_data()
+            try:
+                new_sale.action_confirm()
+            except Exception as ex:
+                new_sale.unlink()
+                logger.exception(ex)
+                return results.error_result(
+                    code='sale_confirm_error',
+                    description='The sale order counldn\'t be confirmed because of the following exception: {}'.format(ex))
+            else:
+                data=new_sale.yuju_get_data()
         # logger.debug("### RESPONSE MDK CREATE ####")
         # logger.debug(data)
         return results.success_result(data)
@@ -321,6 +347,7 @@ class SaleOrder(models.Model):
             state str # 'done', 'draft', 'cancel', 'ready'
         :return:
         """
+        logger.info("### DELIVER ORDER ###")
         config = self.env['madkting.config'].get_config()
 
         if not order and not order_id:
@@ -346,21 +373,28 @@ class SaleOrder(models.Model):
             current_id = current_delivery.id
             current_name = current_delivery.name
             state = kwargs.get('state')
-            if current_delivery.state == 'done' or \
-               current_delivery.state == state:
-                current_data = current_delivery.copy_data()[0]
-                current_data['id'] = current_id
-                current_data['name'] = current_name
-                current_data['state'] = current_delivery.state
-                return results.success_result(data=current_data)
 
+            # if current_delivery.state == 'done' or \
+            #    current_delivery.state == state:
+            #     current_data = current_delivery.copy_data()[0]
+            #     current_data['id'] = current_id
+            #     current_data['name'] = current_name
+            #     current_data['state'] = current_delivery.state
+            #     return results.success_result(data=current_data)
+
+            logger.info("## DELIVERY EXISTS ##")
             if state == 'done':
-                for line in current_delivery.move_lines.sudo():
-                    line.sudo().write({
-                        'quantity_done': line.product_uom_qty,
-                        'state': 'done'
-                    })
-                current_delivery.action_done()
+                logger.info("## PICKING TYPE ##")
+                logger.info(current_delivery.picking_type_id.code)
+                if current_delivery.picking_type_id.code == 'outgoing':
+                    logger.info("## PROCESAR PICKING EXISTENTE ##")
+                    for line in current_delivery.move_lines.sudo():
+                        line.sudo().write({
+                            'quantity_done': line.product_uom_qty,
+                            'state': 'done'
+                        })
+                    current_delivery.action_done()
+
             current_data = current_delivery.copy_data()[0]
             current_data['id'] = current_id
             current_data['name'] = current_name
@@ -454,7 +488,7 @@ class SaleOrder(models.Model):
                     'product_id': order_line.product_id.id,
                     'product_uom_qty': product_uom_qty,
                     'product_uom': order_line.product_uom.id,
-                    'product_packaging': False,
+                    # 'product_packaging': False,
                     'location_id': _get_sale_prods_origin(),
                     'location_dest_id': _get_sale_prods_destiny(),
                     'partner_id': order.partner_id.id,

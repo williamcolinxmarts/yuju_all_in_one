@@ -10,3 +10,4 @@ from . import listeners
 from . import base
 from . import madkting_config
 from . import product_mapping
+from . import stock_warehouse
