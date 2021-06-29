@@ -177,14 +177,15 @@ class ProductProduct(models.Model):
         fields_validation['data'].pop('attributes', None)
 
         if config and config.simple_description_enabled:
-            product_name = product_data.get("name", "")
-            product_data.update({                
-                "description_purchase" : product_name,
-                "description_sale" : product_name,
-                "description_picking" : product_name,
-                "description_pickingout" : product_name,
-                "description_pickingin" : product_name
-            })
+            try:
+                product_data.pop('description_sale')
+                product_data.pop('description_purchase')
+                product_data.pop('description_picking')
+                product_data.pop('description_pickingout')
+                product_data.pop('description_pickingin')
+            except Exception as e:
+                logger.info(e)
+                pass
         # Se quita el default code de la actualizacion, agreado en multi shop, este campo no es editable desde yuju 
         # ya que una vez asignado no puede modificarse
         if 'default_code' in fields_validation['data']:

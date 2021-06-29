@@ -72,14 +72,15 @@ class ProductTemplate(models.Model):
         products = self.env['product.product']
 
         if config and config.simple_description_enabled:
-            product_name = product_data.get("name", "")
-            product_data.update({                
-                "description_purchase" : product_name,
-                "description_sale" : product_name,
-                "description_picking" : product_name,
-                "description_pickingout" : product_name,
-                "description_pickingin" : product_name
-            })
+            try:
+                product_data.pop('description_sale')
+                product_data.pop('description_purchase')
+                product_data.pop('description_picking')
+                product_data.pop('description_pickingout')
+                product_data.pop('description_pickingin')
+            except Exception as e:
+                logger.info(e)
+                pass
 
         is_multi_shop = False
         if product_data.get('is_multi_shop'):
@@ -108,15 +109,16 @@ class ProductTemplate(models.Model):
             product_data['standard_price'] = product_data.pop('cost', None)
 
         logger.info("### SEARCH BARCODE : {} ###".format(product_data.get('barcode')))
-        if product_data.get('barcode'):
-            product_ids = self.env['product.product'].sudo().search([('barcode', '=', product_data.get('barcode', ''))], limit=1)
-            logger.info(product_ids.ids)
-            if product_ids.ids:
-                return results.error_result(code='duplicated_barcode',
-                                            description='El codigo de barras ya esta previamente registrado')
-        else:
-            logger.info("## DROP EMPTY BARCODE ##")
-            product_data.pop('barcode')
+        if 'barcode' in product_data:
+            if product_data.get('barcode'):
+                product_ids = self.env['product.product'].sudo().search([('barcode', '=', product_data.get('barcode', ''))], limit=1)
+                logger.info(product_ids.ids)
+                if product_ids.ids:
+                    return results.error_result(code='duplicated_barcode',
+                                                description='El codigo de barras ya esta previamente registrado')
+            else:
+                logger.info("## DROP EMPTY BARCODE ##")
+                product_data.pop('barcode')
 
         if product_data.get('l10n_mx_edi_code_sat_id'):
             logger.debug('Product data contains l10n_mx_edi_code_sat_id')

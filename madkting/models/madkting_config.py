@@ -21,6 +21,7 @@ class MadktingConfig(models.Model):
     update_order_name = fields.Boolean("Update Order Name with Channel Ref")
     product_custom_fields = fields.Text("Product Custom fields")
     dropship_enabled = fields.Boolean('Dropshiping Enabled')
+    orders_unconfirmed = fields.Boolean('Order not confirmed', help='Deja las ordenes sin confirmar')
     
     @api.model
     def create_config(self, configs):

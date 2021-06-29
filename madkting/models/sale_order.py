@@ -133,7 +133,7 @@ class SaleOrder(models.Model):
             rutas = self.env['stock.location.route'].sudo().search([('name', '=', 'Dropship')], limit=1)
             if not rutas.id:
                 return results.error_result(code='sale_config_dropship_error',
-                                        description='No config routes found for dropship')
+                                        description='No config routes found for dropship')                                        
 
         logger.debug("## FIELD ERRORS ##")
         field_errors = self._validate_order_fields(order_data=order_data)
@@ -161,7 +161,10 @@ class SaleOrder(models.Model):
                 logger.debug("### RESPONSE MDK CREATE EXISTS ####")
                 logger.debug(data)
                 return results.success_result(data)
-        
+
+        if config.orders_unconfirmed:
+            order_data.update({'state' : 'draft'})
+
         try:
             new_sale = self.create(order_data)
 
@@ -183,7 +186,6 @@ class SaleOrder(models.Model):
             )
         else:
             order_line_model = self.env['sale.order.line']
-
             for line in lines:
                 product_tax_rate = line.pop('tax_rate', False)
                 line['order_id'] = new_sale.id
@@ -200,6 +202,10 @@ class SaleOrder(models.Model):
                         logger.info("## QTY IN BRANCH: {}".format(qty_in_branch))
                         if qty_in_branch < line.get('product_uom_qty', 0):
                             line.update({"route_id" : rutas.id})
+
+                if config.orders_unconfirmed:
+                    line.update({'state' : 'draft'})
+
                 try:
                     logger.info(line)
                     new_line = order_line_model.sudo().create(line)
@@ -212,7 +218,7 @@ class SaleOrder(models.Model):
                     return results.error_result(
                         code='sale_line_access_error',
                         description='An exception has occurred trying to '
-                                    'create a sale line for sale order {}. '
+                                    'create a sale line for product {}. '
                                     'The transaction has been rolledback. '
                                     'Exception: {}'.format(line.get('product_id'), err)
                     )
@@ -225,11 +231,11 @@ class SaleOrder(models.Model):
                     return results.error_result(
                         code='sale_create_line_error',
                         description='An exception has occurred trying to '
-                                    'create a sale line for sale order {}. '
+                                    'create a sale line for product {}. '
                                     'The transaction has been rolledback. '
                                     'Exception: {}'.format(line.get('product_id'), lex)
                     )
-                else:
+                else:                    
                     if not set_tax_rate_by_product and tax_cache.get(tax_rate):
                         new_line.tax_id = tax_cache[tax_rate]
                         continue
@@ -242,8 +248,12 @@ class SaleOrder(models.Model):
                                                                        ('company_id', '=', company_id)],
                                                                       limit=1)
                         new_line.tax_id = tax_cache.get(product_tax_rate)
+
             try:
-                new_sale.action_confirm()
+                if not config.orders_unconfirmed:
+                    new_sale.action_confirm()
+                else:
+                    logger.info('orders_unconfirmed, the order should be confirmed manually')
             except Exception as ex:
                 new_sale.unlink()
                 logger.exception(ex)
@@ -347,7 +357,8 @@ class SaleOrder(models.Model):
             state str # 'done', 'draft', 'cancel', 'ready'
         :return:
         """
-        logger.info("### DELIVER ORDER ###")
+        logger.debug("### DELIVER ORDER ###")
+        logger.debug(kwargs)
         config = self.env['madkting.config'].get_config()
 
         if not order and not order_id:
@@ -361,6 +372,10 @@ class SaleOrder(models.Model):
             return results.error_result(code='sale_not_exists',
                                         description='order {} doesn\'t exists'.format(order_id))
 
+        if order.state not in ['sale']:
+            return results.error_result(code='order_unconfirmed',
+                                        description='You must confirm the order_id to deliver')
+
         if not kwargs.get('state'):
             return results.error_result(code='missing_state_argument',
                                         description='delivery state is mandatory')
@@ -369,37 +384,40 @@ class SaleOrder(models.Model):
 
         # if the order already has a pending delivery
         if len(order.picking_ids) == 1:
+            logger.debug(" ### STOCK PICKING CREATE ### ")
             current_delivery = order.picking_ids.sudo()
             current_id = current_delivery.id
             current_name = current_delivery.name
             state = kwargs.get('state')
+            if current_delivery.state == 'done' or \
+               current_delivery.state == state:
+                current_data = current_delivery.copy_data()[0]
+                current_data['id'] = current_id
+                current_data['name'] = current_name
+                current_data['state'] = current_delivery.state
+                return results.success_result(data=current_data)
 
-            # if current_delivery.state == 'done' or \
-            #    current_delivery.state == state:
-            #     current_data = current_delivery.copy_data()[0]
-            #     current_data['id'] = current_id
-            #     current_data['name'] = current_name
-            #     current_data['state'] = current_delivery.state
-            #     return results.success_result(data=current_data)
+            if state == 'done' and current_delivery.picking_type_id.code == 'outgoing':
+                
+                if current_delivery.state == 'confirmed':
+                    logger.debug('confirmed')
+                    current_delivery.action_assign()
 
-            logger.info("## DELIVERY EXISTS ##")
-            if state == 'done':
-                logger.info("## PICKING TYPE ##")
-                logger.info(current_delivery.picking_type_id.code)
-                if current_delivery.picking_type_id.code == 'outgoing':
-                    logger.info("## PROCESAR PICKING EXISTENTE ##")
+                if current_delivery.state == 'assigned':
+                    logger.debug('assigned')
                     for line in current_delivery.move_lines.sudo():
                         line.sudo().write({
-                            'quantity_done': line.product_uom_qty,
-                            'state': 'done'
+                            'quantity_done': line.product_uom_qty
                         })
-                    current_delivery.action_done()
+                    current_delivery.button_validate()
 
             current_data = current_delivery.copy_data()[0]
             current_data['id'] = current_id
             current_data['name'] = current_name
             current_data['state'] = current_delivery.state
             return results.success_result(data=current_data)
+
+        logger.debug("### CREATE STOCK PICKING MANUAL ###")
 
         warehouse_id = order.warehouse_id.id
         location_stock = order.warehouse_id.lot_stock_id  
@@ -524,6 +542,7 @@ class SaleOrder(models.Model):
         else:
             if not new_deliver.sale_id.id:
                 new_deliver.sale_id = order_id
+            
             if new_deliver.state == 'done':
                 new_deliver.action_done()
             deliver_data = new_deliver.copy_data()

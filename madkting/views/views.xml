@@ -11,6 +11,7 @@
           <field name="url"/>
           <field name="company_id"/>
           <field name="active"/>
+          
         </tree>
       </field>
     </record>
@@ -56,6 +57,7 @@
           <field name="update_order_name"/>
           <field name="product_custom_fields"/>
           <field name="dropship_enabled"/>
+          <field name="orders_unconfirmed"/>
         </tree>
       </field>
     </record>
@@ -72,6 +74,7 @@
               <field name="stock_source"/>
               <field name="webhook_stock_enabled"/>
               <field name="dropship_enabled"/>
+              <field name="orders_unconfirmed"/>
             </group>
             <group>
               <field name="simple_description_enabled"/>
@@ -212,9 +215,9 @@
       <field name="inherit_id" ref="sale.view_order_form"/>
       <field name="arch" type="xml">
         <field name="client_order_ref" position="after">
-          <field name="channel" readonly="1"/>
-          <field name="channel_order_reference" readonly="1" />
-          <field name="payment_id" readonly="1" />
+          <field name="channel" attrs="{'readonly':[(1,'=',1)]}"/>
+          <field name="channel_order_reference" attrs="{'readonly':[(1,'=',1)]}" />
+          <field name="payment_id" attrs="{'readonly':[(1,'=',1)]}" />
         </field>
       </field>
     </record>
