@@ -4,7 +4,7 @@ import requests
 import json
 
 
-def send_stock_webhook(env, product_id, hook_id=None):
+def send_stock_webhook(env, product_id, company_id, hook_id=None):
     """
     TODO: register webhook failures in order to implement "retries"
     :param env:
@@ -15,6 +15,9 @@ def send_stock_webhook(env, product_id, hook_id=None):
     :type hook_id: int
     :return:
     """
+    logger.info('### SEND STOCK WEBHOOK ###')
+    logger.info(product_id)
+    logger.info(company_id)
     product = env['product.product'].search([('id', '=', product_id)], limit=1)
 
     if hook_id:
@@ -22,11 +25,24 @@ def send_stock_webhook(env, product_id, hook_id=None):
     else:
         webhook_suscriptions = env['madkting.webhook'].search([
             ('hook_type', '=', 'stock'),
-            ('active', '=', True)
+            ('active', '=', True),
+            ('company_id', '=', company_id)
         ])
 
     config = env['madkting.config'].sudo().get_config()
-
+    # mapping = env['yuju.mapping.product'].sudo().get_product_mapping_by_company(product_id, company_id)
+    mapping = env['yuju.mapping'].sudo().get_mapping(company_id)
+    if mapping:
+        logger.info(mapping)
+        id_shop = mapping.id_shop_yuju
+        product_mapping = env['yuju.mapping.product'].get_product_mapping(product_id, id_shop)
+        if not product_mapping:
+            logger.exception('No se encontro mapeo de producto para ID {}'.format(product_id))
+            return
+        id_product_madkting =  product_mapping.id_product_yuju
+    else:
+        id_product_madkting = product.id_product_madkting
+        
     if config and config.stock_quant_available_quantity_enabled:
         ubicaciones_stock = {}
         if config.stock_source:            
@@ -45,7 +61,7 @@ def send_stock_webhook(env, product_id, hook_id=None):
     webhook_body = {
         'product_id': product.id,
         'default_code': product.default_code,
-        'id_product_madkting': product.id_product_madkting,
+        'id_product_madkting': id_product_madkting,
         'event': 'stock_update',
         'qty_available': product.qty_available,
         'quantities' : ubicaciones_stock

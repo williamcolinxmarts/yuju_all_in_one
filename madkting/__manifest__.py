@@ -12,10 +12,10 @@
         - Update your stock from odoo to your Yuju account.
     """,
 
-    'author': "Israel Calderón Aguilar",
+    'author': "Israel Calderón Aguilar, Gerardo A Lopez Vega",
     'website': "https://yuju.io/",
     'category': 'Sales',
-    'version': '0.1',
+    'version': '0.1.14',
 
     # any module necessary for this one to work correctly
     'depends': [

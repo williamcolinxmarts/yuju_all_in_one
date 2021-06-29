@@ -22,3 +22,7 @@ mad_account_payment_term,madkting account.payment.term,account.model_account_pay
 mad_madkting_config,madkting madkting.config,model_madkting_config,madkting_api_group,1,1,1,1
 mad_madkting_webhook,madkting madkting.webhook,model_madkting_webhook,madkting_api_group,1,1,1,1
 mad_madkting_webhook_users,madkting madkting.webhook.users,model_madkting_webhook,,1,0,0,0
+mad_yuju_mapping,madkting yuju.mapping,model_yuju_mapping,madkting_api_group,1,1,1,1
+mad_yuju_mapping_product,madkting yuju.mapping.product,model_yuju_mapping_product,madkting_api_group,1,1,1,1
+mad_yuju_mapping_users,madkting yuju.mapping.users,model_yuju_mapping,,1,0,0,0
+mad_yuju_mapping_product_users,madkting yuju.mapping.product.users,model_yuju_mapping_product,,1,0,0,0

@@ -20,6 +20,8 @@ class MadktingConfig(models.Model):
     simple_description_enabled = fields.Boolean('Simple Description product enabled', default=False)
     update_order_name = fields.Boolean("Update Order Name with Channel Ref")
     product_custom_fields = fields.Text("Product Custom fields")
+    dropship_enabled = fields.Boolean('Dropshiping Enabled')
+    orders_unconfirmed = fields.Boolean('Order not confirmed', help='Deja las ordenes sin confirmar')
     
     @api.model
     def create_config(self, configs):
@@ -93,6 +95,11 @@ class MadktingWebhook(models.Model):
     hook_type = fields.Char('Webhook type', size=20, required=True)
     url = fields.Char('Web hooks url', size=400, required=True)
     active = fields.Boolean('Active', default=True, required=True)
+    company_id = fields.Many2one('res.company', 'Company')
+
+    _sql_constraints = [
+        ('unique_webhook_company', 'unique(hook_type,company_id)', 'The webhook should be unique per company')
+    ]
 
     @api.model
     def get(self, hook_id=None, hook_type=None):
@@ -133,7 +140,7 @@ class MadktingWebhook(models.Model):
         return results.success_result(data)
 
     @api.model
-    def create_webhook(self, hook_type, url):
+    def create_webhook(self, hook_type, url, company_id):
         """
         :param hook_type:
         :type hook_type: str
@@ -154,7 +161,8 @@ class MadktingWebhook(models.Model):
             webhook = self.create({
                 'hook_type': hook_type,
                 'url': url,
-                'active': True
+                'active': True,
+                'company_id' : company_id
             })
         except Exception as ex:
             logger.exception(ex)

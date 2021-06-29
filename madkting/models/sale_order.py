@@ -87,6 +87,7 @@ class SaleOrder(models.Model):
         :return: new sale.order
         :rtype: sale.order
         """
+        config = self.env['madkting.config'].get_config()
         order_data.pop('confirmation_date', None)
         config_settings = self.env['res.config.settings']
         picking_policy = config_settings.default_picking_policy
@@ -124,7 +125,19 @@ class SaleOrder(models.Model):
         if not order_data.get('invoice_status'):
             order_data['invoice_status'] = 'to invoice'
 
+        if not config:
+            return results.error_result(code='sale_config_error',
+                                        description='No config found for this company')
+
+        if config.dropship_enabled:
+            rutas = self.env['stock.location.route'].sudo().search([('name', '=', 'Dropship')], limit=1)
+            if not rutas.id:
+                return results.error_result(code='sale_config_dropship_error',
+                                        description='No config routes found for dropship')                                        
+
+        logger.debug("## FIELD ERRORS ##")
         field_errors = self._validate_order_fields(order_data=order_data)
+        logger.debug(field_errors)
         if field_errors:
             return results.error_result(code='required_fields_validation',
                                         description=', '.join(field_errors))
@@ -140,16 +153,18 @@ class SaleOrder(models.Model):
         logger.debug("### ORDER DATA ###")
         logger.debug(order_data)
 
-        config = self.env['madkting.config'].get_config()
+        if order_data.get('channel_order_reference'):
+            order_exists = self.search([('channel_order_reference', '=', order_data.get("channel_order_reference"))], limit=1)
+            if not force_creation and order_exists:
+                logger.debug("### ORDER EXISTS {} ###".format(order_data.get("channel_order_reference")))
+                data=order_exists.yuju_get_data()
+                logger.debug("### RESPONSE MDK CREATE EXISTS ####")
+                logger.debug(data)
+                return results.success_result(data)
 
-        order_exists = self.search([('channel_order_reference', '=', order_data.get("channel_order_reference"))], limit=1)
-        if not force_creation and order_exists:
-            logger.debug("### ORDER EXISTS {} ###".format(order_data.get("channel_order_reference")))
-            data=order_exists.yuju_get_data()
-            logger.debug("### RESPONSE MDK CREATE EXISTS ####")
-            logger.debug(data)
-            return results.success_result(data)
-        
+        if config.orders_unconfirmed:
+            order_data.update({'state' : 'draft'})
+
         try:
             new_sale = self.create(order_data)
 
@@ -174,7 +189,25 @@ class SaleOrder(models.Model):
             for line in lines:
                 product_tax_rate = line.pop('tax_rate', False)
                 line['order_id'] = new_sale.id
+
+                if config.dropship_enabled and new_sale.warehouse_id.dropship_enabled:
+                    logger.info("## AGREGAR RUTA DROPSHIP ###")
+                    logger.info("## PEDIDO: {} ###".format(new_sale.name))
+                    product = self.env['product.product'].search([('id', '=', int(line.get('product_id')))], limit=1)
+                    if product.id and product.type == 'product':
+                        logger.info("## ID RUTA: {}".format(rutas.id))
+                        location_stock = new_sale.warehouse_id.lot_stock_id
+                        logger.info("## LOCATION STOCK: {}".format(location_stock.id))
+                        qty_in_branch = self.env['stock.quant']._get_available_quantity(product, location_stock)
+                        logger.info("## QTY IN BRANCH: {}".format(qty_in_branch))
+                        if qty_in_branch < line.get('product_uom_qty', 0):
+                            line.update({"route_id" : rutas.id})
+
+                if config.orders_unconfirmed:
+                    line.update({'state' : 'draft'})
+
                 try:
+                    logger.info(line)
                     new_line = order_line_model.sudo().create(line)
                 except exceptions.AccessError as err:
                     logger.exception(err)
@@ -196,13 +229,13 @@ class SaleOrder(models.Model):
                     if cancel_sale:
                         new_sale.sudo().unlink()
                     return results.error_result(
-                        code='sale_create_error',
+                        code='sale_create_line_error',
                         description='An exception has occurred trying to '
                                     'create a sale line for product {}. '
                                     'The transaction has been rolledback. '
                                     'Exception: {}'.format(line.get('product_id'), lex)
                     )
-                else:
+                else:                    
                     if not set_tax_rate_by_product and tax_cache.get(tax_rate):
                         new_line.tax_id = tax_cache[tax_rate]
                         continue
@@ -215,9 +248,22 @@ class SaleOrder(models.Model):
                                                                        ('company_id', '=', company_id)],
                                                                       limit=1)
                         new_line.tax_id = tax_cache.get(product_tax_rate)
-        data=new_sale.yuju_get_data()
-        logger.debug("### RESPONSE MDK CREATE ####")
-        logger.debug(data)
+
+            try:
+                if not config.orders_unconfirmed:
+                    new_sale.action_confirm()
+                else:
+                    logger.info('orders_unconfirmed, the order should be confirmed manually')
+            except Exception as ex:
+                new_sale.unlink()
+                logger.exception(ex)
+                return results.error_result(
+                    code='sale_confirm_error',
+                    description='The sale order counldn\'t be confirmed because of the following exception: {}'.format(ex))
+            else:
+                data=new_sale.yuju_get_data()
+        # logger.debug("### RESPONSE MDK CREATE ####")
+        # logger.debug(data)
         return results.success_result(data)
 
     def yuju_get_data(self):
@@ -311,6 +357,10 @@ class SaleOrder(models.Model):
             state str # 'done', 'draft', 'cancel', 'ready'
         :return:
         """
+        logger.debug("### DELIVER ORDER ###")
+        logger.debug(kwargs)
+        config = self.env['madkting.config'].get_config()
+
         if not order and not order_id:
             return results.error_result(code='missing_order_id',
                                         description='You must provide at least order_id')
@@ -322,6 +372,10 @@ class SaleOrder(models.Model):
             return results.error_result(code='sale_not_exists',
                                         description='order {} doesn\'t exists'.format(order_id))
 
+        if order.state not in ['sale']:
+            return results.error_result(code='order_unconfirmed',
+                                        description='You must confirm the order_id to deliver')
+
         if not kwargs.get('state'):
             return results.error_result(code='missing_state_argument',
                                         description='delivery state is mandatory')
@@ -330,6 +384,7 @@ class SaleOrder(models.Model):
 
         # if the order already has a pending delivery
         if len(order.picking_ids) == 1:
+            logger.debug(" ### STOCK PICKING CREATE ### ")
             current_delivery = order.picking_ids.sudo()
             current_id = current_delivery.id
             current_name = current_delivery.name
@@ -342,38 +397,36 @@ class SaleOrder(models.Model):
                 current_data['state'] = current_delivery.state
                 return results.success_result(data=current_data)
 
-            if state == 'done':
-                for line in current_delivery.move_lines.sudo():
-                    line.sudo().write({
-                        'quantity_done': line.product_uom_qty,
-                        'state': 'done'
-                    })
-                current_delivery.action_done()
+            if state == 'done' and current_delivery.picking_type_id.code == 'outgoing':
+                
+                if current_delivery.state == 'confirmed':
+                    logger.debug('confirmed')
+                    current_delivery.action_assign()
+
+                if current_delivery.state == 'assigned':
+                    logger.debug('assigned')
+                    for line in current_delivery.move_lines.sudo():
+                        line.sudo().write({
+                            'quantity_done': line.product_uom_qty
+                        })
+                    current_delivery.button_validate()
+
             current_data = current_delivery.copy_data()[0]
             current_data['id'] = current_id
             current_data['name'] = current_name
             current_data['state'] = current_delivery.state
             return results.success_result(data=current_data)
 
+        logger.debug("### CREATE STOCK PICKING MANUAL ###")
+
         warehouse_id = order.warehouse_id.id
+        location_stock = order.warehouse_id.lot_stock_id  
 
         # get origin of products from params or from default query
         def _get_sale_prods_origin():
             products_origin = kwargs.get('default_sale_products_origin')
             if not products_origin:
-                location = self.env['stock.location'] \
-                               .sudo() \
-                               .search([('company_id', '=', order.company_id.id),
-                                        ('active', '=', True),
-                                        ('name', '=', 'Stock')
-                                        ])
-                
-                logger.debug("#### PRODS ORIGIN DEFAULT LOCATION ####")
-                logger.debug(location)
-                logger.debug(order.company_id.id)
-
-                if len(location) == 1:
-                    products_origin = location.id
+                products_origin = location_stock.id
             return products_origin
 
         # get destiny of products from params or from default query
@@ -385,7 +438,7 @@ class SaleOrder(models.Model):
                                .search([('company_id', '=', None),
                                         ('active', '=', True),
                                         ('name', '=', 'Customers')
-                                        ])
+                                        ])           
                 if len(location) == 1:
                     products_destiny = location.id
             return products_destiny
@@ -394,22 +447,32 @@ class SaleOrder(models.Model):
         def _get_picking_type():
             picking_type_id = kwargs.get('picking_type_id')
             if not picking_type_id:
-                picking_type = self.env['stock.picking.type'] \
-                                   .sudo() \
-                                   .search([('name', '=', 'Delivery Orders'),
+                picking_type = self.env['stock.picking.type'].sudo().search([
+                                            ('sequence_code', '=', 'OUT'),
                                             ('warehouse_id', '=', warehouse_id),
                                             ('active', '=', True)
                                             ])
-                if len(picking_type) == 1:
+                if len(picking_type.ids) == 1:
                     picking_type_id = picking_type.id
             return picking_type_id
+
+        if config and config.dropship_enabled:
+            rutas = self.env['stock.location.route'].sudo().search([('name', '=', 'Dropship')], limit=1)
+            if rutas.id:
+                create_delivery = False
+                for order_line in order.order_line:
+                    if not order_line.route_id or (order_line.route_id and order_line.route_id.id != rutas.id):
+                        create_delivery = True
+                        break
+                if not create_delivery:
+                    return results.success_result(data={})
 
         stock_picking = {
             'sale_id': order.id,
             'origin': order.name,
             'note': 'Delivery for order from madkting',
             'move_type': order.picking_policy,
-            'date': datetime.now().isoformat(' '),
+            'date': datetime.now().strftime('%Y-%m-%d'),
             'location_id': _get_sale_prods_origin(),
             'location_dest_id': _get_sale_prods_destiny(),
             'picking_type_id': _get_picking_type(),
@@ -423,19 +486,27 @@ class SaleOrder(models.Model):
             'state': kwargs.get('state')
         }
 
-        for order_line in order.order_line:
+        for order_line in order.order_line:   
+
+            product_uom_qty = order_line.product_uom_qty
+
+            if config and config.dropship_enabled:
+                rutas = self.env['stock.location.route'].sudo().search([('name', '=', 'Dropship')], limit=1)
+                if rutas.id and order_line.route_id and order_line.route_id.id == rutas.id:
+                    continue
+
             stock_picking['move_lines'].append((0, 0, {
                     'state': kwargs.get('state'),
                     'name': order_line.name,
                     'sequence': 10,
                     'priority': '1',
-                    'date': datetime.now().isoformat(' '),
+                    'date': datetime.now().strftime('%Y-%m-%d'),
                     'company_id': order_line.company_id.id,
-                    'date_expected': datetime.now().isoformat(' '),
+                    'date_expected': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'product_id': order_line.product_id.id,
-                    'product_uom_qty': order_line.product_uom_qty,
+                    'product_uom_qty': product_uom_qty,
                     'product_uom': order_line.product_uom.id,
-                    'product_packaging': False,
+                    # 'product_packaging': False,
                     'location_id': _get_sale_prods_origin(),
                     'location_dest_id': _get_sale_prods_destiny(),
                     'partner_id': order.partner_id.id,
@@ -448,11 +519,13 @@ class SaleOrder(models.Model):
                     'restrict_partner_id': False,
                     'warehouse_id': order.warehouse_id.id,
                     'sale_line_id': order_line.id,
-                    'quantity_done': order_line.product_uom_qty
+                    'quantity_done': product_uom_qty
                     # 'product_qty': 1,
                 }
             ))
+        
         try:
+            logger.debug(stock_picking)
             new_deliver = self.env['stock.picking'].create(stock_picking)
         except exceptions.AccessError as err:
             return results.error_result(
@@ -469,6 +542,7 @@ class SaleOrder(models.Model):
         else:
             if not new_deliver.sale_id.id:
                 new_deliver.sale_id = order_id
+            
             if new_deliver.state == 'done':
                 new_deliver.action_done()
             deliver_data = new_deliver.copy_data()
@@ -737,6 +811,7 @@ class SaleOrder(models.Model):
             if sale:
                 payment = payment_model.create({'amount': sale.amount_total,
                                                 'partner_id' : sale.partner_id.id,
+                                                'communication' : sale.name,
                                                 'payment_date': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
                                                 'payment_type': 'inbound',
                                                 'payment_method_id': payment_method_id,
@@ -745,6 +820,7 @@ class SaleOrder(models.Model):
             else:
                 payment = payment_model.create({'amount': invoice.amount_total,
                                                 'partner_id' : invoice.partner_id.id,
+                                                'communication' : invoice.invoice_origin,
                                                 'payment_date': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
                                                 'payment_type': 'inbound',
                                                 'payment_method_id': payment_method_id,
