@@ -20,6 +20,11 @@ class ProductProduct(models.Model):
     _inherit = "product.product"
 
     id_product_madkting = fields.Char('Id product madkting', size=50)
+    tipo_producto_yuju = fields.Selection([('dropship', 'Dropship'), ('mto', 'MTO')],
+                                            string='Tipo Ruta Producto', 
+                                            help='En caso de no tener stock como se procesará Yuju el pedido para este producto, \n'
+                                                 'Dropship: Lo surte el proveedor \n' 
+                                                 'MTO: Se compra y lo surte la empresa')
 
     _sql_constraints = [('id_product_madkting_uniq', 'unique (id_product_madkting,active)',
                          'The relationship between products of madkting and odoo must be one to one!')]
@@ -97,6 +102,41 @@ class ProductProduct(models.Model):
         return results.success_result()
 
     @api.model
+    def _create_supplier_product(self, supplier_data):  
+        logger.debug("## CREATE SUPPLIER PRODUCT ##")      
+        try:
+            supplier_id = self.env['res.partner'].search(['|', ('email', '=', supplier_data.get('email')), ('vat', '=', supplier_data.get('rfc'))], limit=1)
+            logger.debug(supplier_id)
+            if not supplier_id.id:
+                logger.debug("## Supplier not exists ##")
+                supplier_id = self.env['res.partner'].create({
+                    "name" : supplier_data.get('name'),
+                    "phone" : supplier_data.get('contact'),
+                    "email" : supplier_data.get('email'),
+                    "vat" : supplier_data.get('rfc'),
+                })
+        except Exception as e:
+            # No se pudo crear el proveedor
+            logger.exception(e)
+            pass
+        else:
+            logger.debug("## ELSE ##")
+            try:
+                logger.debug(self)
+                logger.debug(self.seller_ids)
+                if not self.seller_ids:
+                    self.write({
+                        "seller_ids" : [(0, 0, {
+                            "name" : supplier_id.id,
+                            "product_uom" : 1,
+                            "price" : supplier_data.get('cost', 1)
+                        })]
+                    })
+            except Exception as e:
+                logger.exception(e)
+                pass
+
+    @api.model
     def update_product(self, product_data, product_type, id_shop=None):
         """
         :param product_data:
@@ -106,9 +146,9 @@ class ProductProduct(models.Model):
         :return:
         :rtype: dict
         """
-        logger.debug("### UPDATE PRODUCT ###")
-        logger.debug(product_data)
-        logger.debug(id_shop)
+        # logger.debug("### UPDATE PRODUCT ###")
+        # logger.debug(product_data)
+        # logger.debug(id_shop)
         product_id = product_data.pop('id', None)
         if not product_id:
             return results.error_result('missing_product_id',
@@ -121,6 +161,11 @@ class ProductProduct(models.Model):
                                         'The product you are looking for does not exists in odoo or has been deleted')
         
         config = self.env['madkting.config'].get_config()
+
+        supplier_data = False
+        if product_data.get('provider'):
+            supplier_data = product_data.pop('provider')
+            product._create_supplier_product(supplier_data)
 
         fields_validation = self.__validate_update_fields(fields=product_data,
                                                           product_type=product_type)
@@ -184,7 +229,7 @@ class ProductProduct(models.Model):
                 product_data.pop('description_pickingout')
                 product_data.pop('description_pickingin')
             except Exception as e:
-                logger.info(e)
+                logger.debug(e)
                 pass
         # Se quita el default code de la actualizacion, agreado en multi shop, este campo no es editable desde yuju 
         # ya que una vez asignado no puede modificarse
@@ -204,11 +249,35 @@ class ProductProduct(models.Model):
         if is_multi_shop and product.company_id:
             fields_validation['data']['company_id'] = False
         
-        logger.debug("#### DATA TO WRITE ####")
-        logger.debug(fields_validation['data'])
+        # logger.debug("#### DATA TO WRITE ####")
+        # logger.debug(fields_validation['data'])
+
+        if "barcode" in fields_validation["data"]: 
+            if fields_validation["data"]["barcode"] == "":
+                # Drop empty barcode because constraint product_product_barcode_uniq
+                fields_validation["data"].pop("barcode")
+            else:
+                logger.debug("## SEARCH BARCODE UPDATE ##")
+                barcode = fields_validation["data"]["barcode"]
+                product_ids = self.sudo().search([('barcode', '=', barcode)], limit=1)
+                logger.debug(product_ids.ids)
+                if product_ids.ids:
+                    return results.error_result(code='duplicated_barcode',
+                                                description='El codigo de barras ya esta previamente registrado')
+                else:
+                    product_ids = self.sudo().search([('barcode', '=', barcode), ('active', '=', False)], limit=1)
+                    logger.debug(product_ids.ids)
+                    if product_ids.ids:
+                        return results.error_result(code='duplicated_barcode',
+                                                description='El codigo de barras ya esta previamente registrado')
 
         try:
             product.write(fields_validation['data'])
+            if config and config.update_parent_list_price and fields_validation['data'].get('list_price'):
+                logger.debug("## UPDATE PARENT PRICE {}##".format(product.product_tmpl_id))
+                product_list_price = fields_validation['data'].get('list_price')
+                product.product_tmpl_id.write({"list_price" : product_list_price})
+
         except exceptions.AccessError as ae:
             logger.exception(ae)
             return results.error_result('access_error', ae)
@@ -260,6 +329,11 @@ class ProductProduct(models.Model):
             product_ids = self.search([('barcode', '=', variation_data.get('barcode', ''))], limit=1)
             if product_ids.ids:
                 return results.error_result(code='duplicated_barcode',
+                                            description='El codigo de barras ya esta previamente registrado')
+            else:
+                product_ids = self.search([('barcode', '=', variation_data.get('barcode', '')), ('active', '=', False)], limit=1)
+                if product_ids.ids:
+                    return results.error_result(code='duplicated_barcode',
                                             description='El codigo de barras ya esta previamente registrado')
 
         attributes_structure = parent.attribute_lines_structure()
@@ -315,7 +389,7 @@ class ProductProduct(models.Model):
         for attribute, value in variant_attributes.items():
             # logger.in0fo(attributes_structure)
             value_id = attributes_structure[attribute].get('values').get(value)
-            # logger.info(value_id)
+            # logger.debug(value_id)
             # if this value_id is not already assigned to this attribute line
             if not value_id:
                 # try to get value from the existing attribute
@@ -352,7 +426,7 @@ class ProductProduct(models.Model):
         attribute_line_ids = [
                 (1, a['attribute_line_id'], {'value_ids': [(4, a['value_id'])]}) for a in new_attribute_lines
         ]
-        # logger.info(attribute_line_ids)
+        # logger.debug(attribute_line_ids)
         try:
             parent.product_tmpl_id.write({'attribute_line_ids': attribute_line_ids})
         except Exception as ex:
@@ -364,7 +438,7 @@ class ProductProduct(models.Model):
 
         for variation in parent.product_variant_ids:
             if variant_attributes == variation.get_data().get('attributes'):
-                # logger.info(fields_validation['data'])
+                # logger.debug(fields_validation['data'])
                 if id_shop:
                     id_product_madkting = v_data.get('id_product_madkting')
                     default_code = v_data.get('default_code')
@@ -524,8 +598,8 @@ class ProductProduct(models.Model):
         data['variations'] = list()
         variation_attributes = defaultdict(list)
         data['template_id'] = self.product_tmpl_id.id
-        data['id'] = self.product_variant_id.id
-        data['default_code'] = self.product_variant_id.default_code
+        data['id'] = self.id
+        data['default_code'] = self.default_code
         data['product_variant_count'] = self.product_tmpl_id.product_variant_count
         for variation in self.product_variant_ids:
             variation_data = variation.get_data()
@@ -557,6 +631,9 @@ class ProductProduct(models.Model):
 
         else:
             updatable_fields = self.__update_variation_fields
+
+            if config and config.update_parent_list_price:
+                updatable_fields.update({'list_price': (int, float)})
 
         for field, value in fields.items():
             if field in updatable_fields:
